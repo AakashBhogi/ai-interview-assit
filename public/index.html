@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Interview Assistant</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f0f12; color: #e8e8f0; height: 100vh; display: flex; flex-direction: column; padding: 20px; gap: 16px; }
+  h1 { font-size: 16px; font-weight: 500; color: #7c7ca0; letter-spacing: 0.05em; }
+  #transcript { background: #1a1a24; border: 1px solid #2a2a38; border-radius: 10px; padding: 14px 16px; min-height: 72px; font-size: 14px; color: #9090b0; line-height: 1.6; }
+  #answer { flex: 1; background: #16161e; border: 1px solid #2a2a38; border-radius: 10px; padding: 16px 18px; font-size: 15px; line-height: 1.7; overflow-y: auto; white-space: pre-wrap; }
+  #controls { display: flex; gap: 12px; align-items: center; }
+  button { padding: 10px 22px; border-radius: 8px; border: none; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+  #startBtn { background: #5b5bd6; color: white; }
+  #startBtn:hover { background: #4f4fc0; }
+  #startBtn.recording { background: #c0392b; }
+  #status { font-size: 12px; color: #5a5a7a; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #5b5bd6; margin-right: 6px; }
+  .dot.active { background: #22c55e; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+</style>
+</head>
+<body>
+<h1><span class="dot" id="dot"></span>AI INTERVIEW ASSISTANT</h1>
+<div id="transcript">Press "Start Listening" and speak your interview question…</div>
+<div id="answer">Answer will appear here…</div>
+<div id="controls">
+  <button id="startBtn" onclick="toggleListen()">Start Listening</button>
+  <span id="status">Ready</span>
+</div>
+
+<script>
+const DEEPGRAM_KEY = 'YOUR_DEEPGRAM_API_KEY'; // replace this
+let ws, mediaStream, source, processor, ctx;
+let history = [];
+let isListening = false;
+let silenceTimer = null;
+let currentTranscript = '';
+
+async function toggleListen() {
+  isListening ? stopListening() : startListening();
+}
+
+async function startListening() {
+  isListening = true;
+  document.getElementById('startBtn').textContent = 'Stop Listening';
+  document.getElementById('startBtn').classList.add('recording');
+  document.getElementById('dot').classList.add('active');
+  document.getElementById('status').textContent = 'Connecting…';
+
+  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  ctx = new AudioContext({ sampleRate: 16000 });
+  source = ctx.createMediaStreamSource(mediaStream);
+  processor = ctx.createScriptProcessor(4096, 1, 1);
+
+  ws = new WebSocket(`wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&interim_results=true`, ['token', DEEPGRAM_KEY]);
+
+  ws.onopen = () => {
+    document.getElementById('status').textContent = 'Listening…';
+    source.connect(processor);
+    processor.connect(ctx.destination);
+    processor.onaudioprocess = (e) => {
+      if (ws.readyState !== 1) return;
+      const float32 = e.inputBuffer.getChannelData(0);
+      const int16 = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) int16[i] = float32[i] * 32767;
+      ws.send(int16.buffer);
+    };
+  };
+
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    const t = data?.channel?.alternatives?.[0]?.transcript;
+    if (!t) return;
+
+    if (data.is_final) {
+      currentTranscript += ' ' + t;
+      document.getElementById('transcript').textContent = currentTranscript.trim();
+      clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => {
+        const q = currentTranscript.trim();
+        if (q.length > 8) { getAnswer(q); currentTranscript = ''; }
+      }, 1200); // fire 1.2s after last word
+    } else {
+      document.getElementById('transcript').textContent = (currentTranscript + ' ' + t).trim();
+    }
+  };
+}
+
+function stopListening() {
+  isListening = false;
+  document.getElementById('startBtn').textContent = 'Start Listening';
+  document.getElementById('startBtn').classList.remove('recording');
+  document.getElementById('dot').classList.remove('active');
+  document.getElementById('status').textContent = 'Ready';
+  ws?.close(); mediaStream?.getTracks().forEach(t => t.stop());
+  processor?.disconnect(); source?.disconnect(); ctx?.close();
+}
+
+async function getAnswer(question) {
+  document.getElementById('status').textContent = 'Thinking…';
+  document.getElementById('answer').textContent = '';
+
+  const resp = await fetch('/api/answer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, history: history.slice(-6) })
+  });
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let full = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    full += decoder.decode(value);
+    document.getElementById('answer').textContent = full;
+  }
+
+  history.push({ role: 'user', content: question }, { role: 'assistant', content: full });
+  document.getElementById('status').textContent = 'Ready — keep speaking';
+}
+</script>
+</body>
+</html>
