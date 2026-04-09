@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/answer.js": {
+      "maxDuration": 30
+    }
+  }
+}
